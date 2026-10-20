@@ -1,7 +1,7 @@
 # Local usage metrics
 
-Use `--usage-file usage.jsonl` to opt in for a single invocation. No configuration
-is persisted and no telemetry is sent anywhere. The file location is entirely
+Use `--usage-file usage.jsonl` or an explicitly selected config with `usage_file`
+to opt in. No telemetry is sent anywhere. The file location is entirely
 explicit; parent directories must already exist. Prefer a private directory
 outside repositories, shared folders, and automatic uploads. Choose model IDs
 that do not contain personal or sensitive names: the selected model ID is recorded.
@@ -12,11 +12,18 @@ offload stats --usage-file usage.jsonl
 offload stats --usage-file usage.jsonl --json
 ```
 
+Known API response statuses are recorded separately as `response_status` and
+aggregated in `response_statuses`. Structured-mode success means the HTTP/JSON
+operation succeeded; it does not mean the API status is completed. Content logging
+is independent; see [configuration](configuration.md).
+
 Every recorded event has a schema version, UTC start timestamp, elapsed
-milliseconds, command, validated selected model ID (inference only), network
-scope, attempted flag, normalized outcome, and token usage. No prompt, response,
-input path, endpoint URL, header, raw error, server model name, or identity is
-recorded. Model IDs have a 128-byte ceiling and a restricted ASCII alphabet.
+milliseconds, command, optional diagnostic model label (inference only), network
+scope, attempted flag, normalized outcome, and token usage. Usage metrics contain
+no prompt, response, input path, endpoint URL, header, raw error, server model name,
+or personal identity. Diagnostic model labels have a 128-byte ceiling and a
+restricted ASCII alphabet; absent, unsafe, or credential-like labels are omitted
+without restricting API model selection.
 Logging is a fixed field allowlist; arbitrary server metadata is never copied.
 
 ```json

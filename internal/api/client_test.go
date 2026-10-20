@@ -32,8 +32,16 @@ func client(t *testing.T, handler http.HandlerFunc) *Client {
 	return c
 }
 func generate(c *Client) (string, error) {
-	text, _, err := c.Generate(context.Background(), "test-model", "instruction", "private-input", 42, 100)
-	return text, err
+	raw, _, err := c.CreateResponse(context.Background(), testRequest())
+	if err != nil {
+		return "", err
+	}
+	return Text(raw, 100)
+}
+func testRequest() map[string]json.RawMessage {
+	var body map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(`{"model":"test-model","instructions":"instruction","input":"private-input","store":false,"stream":false,"max_output_tokens":42}`), &body)
+	return body
 }
 
 func TestRequestShape(t *testing.T) {
@@ -88,7 +96,11 @@ func TestOutputBoundAndParts(t *testing.T) {
 	if got != "one\ntwo" || err != nil {
 		t.Fatalf("%q %v", got, err)
 	}
-	_, _, err = c.Generate(context.Background(), "m", "i", "x", 1, 6)
+	raw, _, err := c.CreateResponse(context.Background(), testRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Text(raw, 6)
 	code(t, err, 6)
 }
 func TestCancelAndTimeout(t *testing.T) {
@@ -212,7 +224,11 @@ func TestServerUsage(t *testing.T) {
 				body := strings.Replace(completed, `"completed"`, fmt.Sprintf("%q", status), 1)
 				fmt.Fprint(w, strings.TrimSuffix(body, "}")+`,"model":"private-server-model","usage":{"input_tokens":12,"output_tokens":0,"total_tokens":"private-invalid"}}`)
 			})
-			_, usage, err := c.Generate(context.Background(), "test-model", "instruction", "input", 10, 100)
+			raw, usage, err := c.CreateResponse(context.Background(), testRequest())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = Text(raw, 100)
 			if usage.Input == nil || *usage.Input != 12 || usage.Output == nil || *usage.Output != 0 || usage.Total != nil {
 				t.Fatal("incorrect usage parsing")
 			}
@@ -224,4 +240,37 @@ func TestServerUsage(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCredentialRedirectAndResponseLimit(t *testing.T) {
+	const secret = "example-credential"
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Error("credential crossed origin")
+		}
+		fmt.Fprint(w, completed)
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+secret {
+			t.Error("missing selected bearer credential")
+		}
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+	c, err := New(Config{Endpoint: source.URL, Timeout: time.Second, AllowRedirects: true, APIKey: secret})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, _, err := c.CreateResponse(context.Background(), testRequest()); err != nil {
+		t.Fatal(err)
+	}
+	c, err = New(Config{Endpoint: target.URL, Timeout: time.Second, MaxResponseBytes: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, _, err = c.CreateResponse(context.Background(), testRequest())
+	code(t, err, 6)
 }

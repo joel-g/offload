@@ -1,36 +1,30 @@
 # Design
 
-`main` creates an interrupt-aware context. The Cobra CLI validates flags and reads
-one explicit source with a byte ceiling. The API client sends a non-streaming
-Responses request containing `model`, `instructions`, `input`, `store:false`,
-`stream:false`, and `max_output_tokens`. It returns only assistant `output_text`
-from a completed response. Reasoning and tool-call output are never executed or
-returned as assistant text. Refusals, incomplete responses, and server errors fail
-without exposing partial content.
+The CLI separates client configuration from request fields. `client` controls
+transport and local resource limits; `request` contains API defaults. Explicit
+input, generic JSON field overrides, and named API flags build the request. The
+client forwards optional API fields rather than manufacturing generation defaults.
 
-`ask` treats the input as the user's prompt. `summarize` and `review` use fixed
-instructions that frame supplied input as untrusted data. Those instructions are
-guidance to a model, not a security boundary. All commands have identical network,
-storage-request, and size policies.
+`responses` sends a JSON object to `/v1/responses` and preserves the full JSON
+response. `ask` sends text without instructions; `summarize` and `review` add minimal,
+overridable task instructions. Plain helper output projects completed assistant
+text; structured output retains all response data, including tool calls and partial
+responses. No tool dispatch, shell execution, model-management call, or source edit
+is performed by the CLI. Server-hosted tools are controlled by explicit API fields.
 
-Optional local usage metrics use a fixed event schema and an explicit file flag.
-The client extracts only bounded numeric usage fields; the CLI records normalized
-outcomes and the validated requested model. Stats aggregates local records without
-inference. A bounded sibling-directory lock serializes local readers and writers.
-See [usage metrics](usage-metrics.md) for limitations and recovery.
+Transport uses Go's HTTP client with cancellation, a deadline, a response byte
+limit, redirect validation, and no ambient proxies. Loopback is the default policy;
+nonlocal use is configurable. Optional bearer authentication reads a named
+environment variable. Credentials are stripped on cross-origin redirects and are
+never included in logs. Error messages are generated locally without server bodies.
 
-The client clones Go's standard HTTP transport, disables proxies, and enforces
-destination policy both at URL validation and at dialing. Default mode never
-resolves arbitrary hostnames. Redirect opt-in does not imply nonlocal opt-in.
-Requests use a context and an HTTP timeout. TLS uses the standard trust store.
-Response bodies are read through a limit before decoding; output text is checked
-before writing. Remote errors are reduced to status codes or static messages.
+Configuration is explicitly selected, size-limited, and schema-checked. Separate
+usage and content logs use a shared bounded append/lock implementation. Usage has a
+metadata allowlist. Content requires explicit enablement and redacts credential-like
+input/output fields before truncation. Neither logger accepts HTTP headers or raw
+configuration. Logs must not alias each other, the config, or the selected input.
 
-Normal tests use `httptest` and exercise protocol fields, parsing, cancellation,
-timeouts, byte limits, redirects, endpoint policy, error redaction, and CLI output.
-No model download, inference, or server configuration is part of the tests.
-
-V1 intentionally omits streaming, tool use, repository discovery, credential
-persistence, automatic model selection, automatic edits, and backend fallback.
-The protocol assumes a Responses-compatible server with a completed status and
-assistant message content; incompatible servers fail explicitly.
+Tests use mock servers, temporary logs, and cooperating subprocesses. They cover
+request omission/overrides, response preservation, transport controls, config
+precedence, redaction, metrics aggregation, bounds, and concurrent appends. Real
+server compatibility and inference must be tested separately.

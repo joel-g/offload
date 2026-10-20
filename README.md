@@ -1,9 +1,8 @@
 # offload
 
-A small, harness-agnostic Go CLI for sending explicit, bounded work to local
-inference. Works from a terminal or a coding harness such as Codex or Claude Code.
-It does not crawl repositories, run shell commands, dispatch model tools, or edit
-source files. Model output is advice for the caller to review.
+A small Go CLI for compatible Responses APIs, usable from terminals, scripts, and
+coding harnesses. It sends explicitly selected input, returns API data or text,
+and never executes model tools or edits source files.
 
 ## Build
 
@@ -16,105 +15,150 @@ go vet ./...
 ```
 
 Use `offload.exe` on Windows. Dependencies are pinned in `go.mod` and `go.sum`.
+Normal tests use mock servers; they do not download models or run real inference.
 
-## Usage
-
-Start a compatible inference server separately. The default base URL is
-`http://127.0.0.1:1234`. Generation uses `POST /v1/responses` with explicit
-`store:false`; there is no fallback to an API without that field. LM Studio's
-Responses API is the initial target (0.4.16 compatibility baseline). The normal
-test suite uses mock inference only; it does not verify an installed server.
+## Commands
 
 ```sh
 offload health
 offload models
 offload ask --model local-model --file question.txt
-offload summarize --model local-model --file notes.txt --json
-offload review --model local-model --file change.diff
-offload ask --model local-model --file question.txt --usage-file usage.jsonl
-offload stats --usage-file usage.jsonl --json
-printf 'Explain this small algorithm.\n' | offload ask --model local-model --stdin
+offload summarize --model local-model --file notes.txt
+offload review --model local-model --file change.diff --json
+offload responses --file request.json
+offload ask --config config.json --stdin
+offload stats --config config.json --json
 ```
 
-Choose exactly one of `--file` and `--stdin`. Inputs must be nonempty UTF-8 text.
-Files must be regular files. Model IDs are explicit; select an advertised ID from
-`models`. IDs must be 1–128 ASCII characters, start with a letter or digit, and
-contain only letters, digits, `/`, `.`, `_`, `:`, or `-`; URLs and drive paths are
-rejected. `health` checks that `/v1/models` returns a model list; it does not load a
-model or prove generation works. An empty advertised list is a healthy API.
+`ask`, `summarize`, and `review` accept UTF-8 text. `responses` accepts a JSON
+request object and writes the complete JSON response. Select exactly one explicit
+source, `--file` or `--stdin`; files must be regular files. There is no repository
+crawling or automatic context collection.
 
-| Flag | Default | Allowed range / meaning |
+`ask` supplies no instructions. `summarize` and `review` are convenience commands
+with short task instructions; override them with `--instructions`, `--set`, or
+configuration. They impose no tool-use or workflow policy on the model.
+
+### Model selection
+
+`--model` sets the request's `model` field exactly; it does not call a load/unload
+endpoint or inspect which model is currently loaded. A model can also come from
+configuration or a raw request. If absent everywhere, the field is omitted: the
+server chooses its behavior and may require an explicit model. There is no silent
+client fallback to another model.
+
+LM Studio can load the requested model on demand when JIT loading is enabled.
+Auto-Evict may unload a previous JIT-loaded model. `models` lists models visible to
+the server, which may include downloaded models that are not currently loaded.
+See LM Studio's [loading documentation](https://lmstudio.ai/docs/developer/core/ttl-and-auto-evict)
+and [model-list documentation](https://lmstudio.ai/docs/developer/openai-compat/models).
+These server behaviors are separate from offload's request construction.
+
+### API options
+
+Unspecified optional API fields are omitted. In particular, offload does **not**
+force `store:false`, `stream:false`, a token limit, temperature, or reasoning effort.
+Server defaults apply. Request storage behavior explicitly if needed:
+
+```sh
+offload ask --model local-model --file question.txt --store=false --max-output-tokens 1024
+offload ask --file question.txt --set 'temperature=0.2' --set 'reasoning={"effort":"low"}'
+```
+
+`--set name=JSON` forwards any top-level request field. Nested objects are replaced,
+not merged. Shell quoting varies; use a JSON request file for complex values:
+
+```json
+{"model":"local-model","input":"Explain this algorithm.","store":false,"max_output_tokens":1024}
+```
+
+Tools, structured inputs, continuation IDs, reasoning settings, and provider
+extensions can be supplied through raw requests, `--set`, or `request` in config.
+The server validates and implements those fields. Tool-call responses are returned
+as data; offload has no local tool execution loop. Requested server-hosted tools
+may run on the server according to its own API behavior.
+
+Supported endpoints and limitations are defined in [API compatibility](docs/api-compatibility.md).
+This is a non-streaming Responses client, not complete OpenAI or LM Studio API parity.
+
+## Configuration and logging
+
+Use `--config config.json` to select a file explicitly. There is no automatic
+repository/home-directory config search or environment-based config discovery.
+[config.example.json](config.example.json) keeps both logging channels off.
+
+```json
+{
+  "client": {"timeout":"2m"},
+  "request": {"model":"local-model","store":false},
+  "usage_file":"usage.jsonl",
+  "content_logging":{"enabled":false,"file":"content.jsonl"}
+}
+```
+
+Usage metrics record counts, timings, outcomes, response status, and reported token
+usage. Content logging is separate and requires explicit enablement plus its own
+file. Set `content_logging.enabled:true` or use `--log-content --content-file ...`.
+It records redacted input/output content, never HTTP traffic or configuration.
+Credential redaction is conservative but cannot identify every secret; opt-in
+content logs can retain sensitive material. Keep logs outside source control.
+
+Flags override configuration. For API fields the order is configuration defaults,
+command input/raw request, `--set`, then dedicated API flags. Config-relative file
+paths resolve beside the config; CLI paths resolve from the working directory.
+`--log-content=false` disables configured content logging and `--usage-file=`
+disables configured metrics. [Configuration details](docs/configuration.md).
+
+## Client operational defaults
+
+| Setting | Default | Override |
 | --- | --- | --- |
-| `--max-input-bytes` | 65536 | 1–16777216 UTF-8 bytes |
-| `--max-output-bytes` | 65536 | 1–1048576 generated text bytes |
-| `--max-output-tokens` | 1024 | 1–32768, sent to server |
-| `--timeout` | 2m | Positive HTTP deadline, e.g. 30s |
-| `--endpoint` | http://127.0.0.1:1234 | Base URL, without `/v1` |
-| `--json` | false | Structured result on stdout; errors on stderr |
-| `--allow-nonlocal` | false | Explicitly permit non-loopback destinations |
-| `--allow-redirects` | false | Permit redirects, subject to destination policy |
-| `--usage-file` | unset | Opt in to local usage JSONL; `stats` reads this explicit file |
+| Endpoint | `http://127.0.0.1:1234` | `--endpoint` / `client.endpoint` |
+| HTTP deadline | 2m | `--timeout` / `client.timeout` |
+| Selected input limit | 65536 bytes | `--max-input-bytes` / `client.max_input_bytes` |
+| Rendered inference output limit | 65536 bytes | `--max-output-bytes` / `client.max_output_bytes` |
+| HTTP response limit | 8 MiB | `--max-response-bytes` / `client.max_response_bytes` |
+| Nonlocal destinations | denied | `--allow-nonlocal` / `client.allow_nonlocal` |
+| Redirects | denied | `--allow-redirects` / `client.allow_redirects` |
+| Authentication | none | `--api-key-env` / `client.api_key_env` |
+| Usage/content logs | disabled | explicit logging policy or flags |
 
-Limits reject oversized data rather than silently truncating it. The HTTP response
-body has a fixed 8 MiB ceiling. Generated-text limits exclude JSON encoding and the
-plain-output trailing newline. The token limit relies on server enforcement; the
-client separately checks response and text byte limits. Incomplete generation is
-an error with no partial output. The deadline covers HTTP connection and body read,
-not time spent waiting for stdin. Interrupting cancels an active HTTP request.
+Byte limits must be positive and representable; the old fixed input/output ceilings
+and generation-token ceiling are removed. Byte limits bound client I/O, not model
+behavior. Raising them permits larger allocations. The output limit includes JSON
+encoding but excludes the final newline. The HTTP deadline covers connection/body
+reading, not waiting for stdin. Interrupting cancels an active request.
 
-Plain output is generated text, one model ID per line, or `ok`. JSON examples:
+Loopback defaults, redirect checks, and disabled ambient proxies are client
+network controls, not API requirements. Remote use is explicitly configurable;
+prefer HTTPS. Credentials are read only from the explicitly named environment
+variable and never persisted. Authorization is removed on cross-origin redirects.
+URL-embedded credentials are rejected. No TLS verification bypass is provided.
 
-```json
-{"command":"ask","model":"local-model","text":"An explanation."}
-```
+## Results and errors
 
-```json
-{"command":"models","models":["local-model"]}
-```
+Plain text helpers return assistant text. `--json` returns a command envelope with
+the full API `response`; `responses` returns the full API object directly, including
+tool calls, reasoning, refusals, incomplete output, and API status. Structured-mode
+exit 0 means an HTTP/JSON response was received, not that inference completed;
+inspect `status`. Text mode reports non-text or incomplete responses as errors.
+`models` prints IDs and `health` checks `/v1/models` without inference.
 
-Errors use `{"error":{"code":2,"message":"--model is required"}}` on stderr
-when `--json` has been parsed. Invalid flags encountered before `--json` is parsed
-can produce a plain error. Help is always plain text.
+Errors on stderr are static messages/status codes, never raw server error bodies,
+URLs, input paths, credential values, or headers. JSON errors are emitted when
+`--json` was parsed. Help and early argument-parsing errors may be plain text.
 
-| Exit code | Meaning |
+| Exit | Meaning |
 | --- | --- |
-| 0 | Success |
-| 2 | Invalid command, configuration, or input |
-| 3 | Transport/policy failure or output write failure |
-| 4 | HTTP failure or failed inference |
-| 5 | Malformed, empty, refused, or incomplete response |
-| 6 | Input, response, or output exceeds a byte limit |
-| 7 | Usage recording or stats read failure |
+| 0 | Client operation succeeded; inspect API status in structured output |
+| 2 | Invalid command, config, input, or unsupported request mode |
+| 3 | Transport/policy or output write failure |
+| 4 | HTTP failure, or failed inference in text mode |
+| 5 | Malformed response, or unavailable completed text in text mode |
+| 6 | Client byte limit exceeded |
+| 7 | Logging or stats read failure (stdout may already contain a result) |
 | 124 | HTTP timeout |
 | 130 | Request canceled |
 
-## Privacy and trust
-
-Only explicitly supplied text is sent. Prompts and responses are not logged or
-persisted by this CLI. Requested output is written to stdout. Error messages omit
-server bodies, URLs, input paths, and raw transport errors. No credentials are
-stored; embedded URL credentials are rejected. There is no credential management
-or config file in v1.
-
-`store:false` requests no storage through the Responses protocol. It does **not**
-prove that every server, proxy, or operator disables logging or retention. Verify
-the server's behavior and policies before supplying sensitive material.
-
-By default only literal loopback IPs and `localhost` are accepted. `localhost` is
-dialed as `127.0.0.1`, without DNS. All ambient HTTP proxies are disabled. Redirects
-are denied unless separately enabled; even then, every destination must satisfy
-the loopback policy unless `--allow-nonlocal` is also supplied. Nonlocal opt-in
-allows data egress, including plain HTTP if configured. Prefer HTTPS for remote
-servers. No TLS verification bypass is provided.
-
-See [design](docs/design.md) and [harness integration](docs/harnesses.md).
-
-## Optional usage metrics
-
-Metrics are off by default. Supply `--usage-file` on each invocation you want to
-count; there is no environment opt-in or default file location. Relative paths
-resolve from the current directory. Use a private directory outside source control
-and the same absolute path for cooperating harnesses. `stats --usage-file ...`
-prints a summary; add `--json` for structured totals. Stats never calls inference
-or records itself. See [usage metrics](docs/usage-metrics.md) for schema, unknown
-counts, permissions, concurrency, and retention.
+[Design](docs/design.md), [usage metrics](docs/usage-metrics.md), and
+[optional harness guidance](docs/harnesses.md).

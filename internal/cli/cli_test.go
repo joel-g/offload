@@ -30,8 +30,8 @@ func TestCommands(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Error(err)
 		}
-		if body["store"] != false || body["input"] != "supplied input" {
-			t.Error("input or no-store mismatch")
+		if _, exists := body["store"]; exists || body["input"] != "supplied input" {
+			t.Error("input mismatch or unexpected store default")
 		}
 		fmt.Fprint(w, `{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"result"}]}]}`)
 	}))
@@ -75,13 +75,11 @@ func TestValidationAndRedaction(t *testing.T) {
 		input string
 		code  int
 	}{
-		{[]string{"ask", "--stdin"}, "text", 2},
 		{[]string{"ask", "--model", "m"}, "text", 2},
 		{[]string{"ask", "--model", "m", "--stdin", "--file", "private-file"}, "text", 2},
 		{[]string{"ask", "--model", "m", "--file", "private-missing"}, "", 2},
 		{[]string{"ask", "--model", "m", "--stdin", "--max-input-bytes", "2"}, "text", 6},
-		{[]string{"ask", "--model", "m", "--stdin", "--max-output-tokens", "0"}, "text", 2},
-		{[]string{"ask", "--model", "m", "--stdin"}, " ", 2},
+		{[]string{"ask", "--model", "m", "--stdin", "--max-input-bytes", "0"}, "text", 2},
 		{[]string{"ask", "--model", "m", "--stdin"}, string([]byte{0xff}), 2},
 		{[]string{"ask", "private-argument"}, "", 2},
 		{[]string{"--private-flag"}, "", 2},
@@ -148,7 +146,7 @@ func TestUsageOptInAndPrivacy(t *testing.T) {
 		t.Fatal("private content reached log")
 	}
 	var fields map[string]any
-	if json.Unmarshal(b, &fields) != nil || len(fields) != 9 || fields["model"] != "local-model" {
+	if json.Unmarshal(b, &fields) != nil || len(fields) != 10 || fields["model"] != "local-model" {
 		t.Fatalf("unexpected event schema: %s", b)
 	}
 	s, err := metrics.Read(log)
@@ -185,7 +183,7 @@ func TestUsageFailuresAndChecks(t *testing.T) {
 	if status != 4 || strings.Contains(stderr, "private") {
 		t.Fatalf("failure: %d %s", status, stderr)
 	}
-	status, _, stderr = run([]string{"ask", "--model", "private\nmodel", "--stdin", "--usage-file", log}, "input")
+	status, _, stderr = run([]string{"ask", "--model", "private\nmodel", "--usage-file", log}, "input")
 	if status != 2 || strings.Contains(stderr, "private") {
 		t.Fatalf("model validation: %d %s", status, stderr)
 	}
@@ -212,7 +210,7 @@ func TestLoggingFailuresVisible(t *testing.T) {
 		t.Fatalf("logging failure: %d %s %s", status, out, stderr)
 	}
 	status, _, stderr = run([]string{"ask", "--usage-file", path}, "")
-	if status != 2 || !strings.Contains(stderr, "cannot record usage") || !strings.Contains(stderr, "--model is required") || strings.Contains(stderr, "private") {
+	if status != 2 || !strings.Contains(stderr, "cannot record usage") || !strings.Contains(stderr, "choose exactly one") || strings.Contains(stderr, "private") {
 		t.Fatalf("dual failure: %d %s", status, stderr)
 	}
 	status, _, stderr = run([]string{"stats", "--usage-file", path}, "")

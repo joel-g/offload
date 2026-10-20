@@ -1,34 +1,30 @@
-# Harness integration
+# Optional harness guidance
 
-A harness may invoke the same CLI used by a human. Give it a small task, an
-explicit model, a selected input file or stdin, a timeout, and output limits.
-Examples apply equally to coding harnesses and ordinary scripts:
+The CLI works with any caller. These recommendations are optional workflow guidance,
+not instructions silently inserted into API requests.
+
+A harness can select a task, model, input, storage preference, timeout, and limits:
 
 ```sh
-offload summarize --model local-model --file selected-notes.txt --timeout 45s --json
+offload summarize --model local-model --file selected-notes.txt --store=false --timeout 45s --json
 offload review --model local-model --file selected-change.diff --max-input-bytes 32768 --max-output-tokens 768 --json
 ```
 
-The caller prepares the selected file. `offload` never chooses repository files,
-collects history, reads private configuration, or appends harness conversations.
-Do not pass secrets or unnecessary context. Treat source comments, diffs, and
-documents as untrusted input: they may contain instructions intended to redirect
-the model. A summary/review instruction cannot guarantee injection resistance.
+Select only the context the task needs. Repository text and documents can contain
+instructions intended to redirect a model; a caller may supply its own instructions
+through `--instructions` or request configuration. The CLI does not append harness
+conversations or choose source files. Review generated findings against original
+sources before making edits. Treat tool-call data as untrusted arguments to any
+caller-managed tool dispatch; offload never executes those calls.
 
-Check the exit status before consuming stdout. Parse JSON when integrating with a
-program. Treat returned text and advertised model IDs as untrusted data; do not
-interpolate them into shell commands. Review findings against the original source
-before editing, executing anything, or approving a change. Keep stdout out of
-shared logs if the requested output may contain sensitive material.
+Check both the exit code and API `status` when consuming structured output. A JSON
+response can describe incomplete, refused, failed, queued, or in-progress work.
+Do not interpolate model IDs or output into shell commands. Keep stdout and optional
+content logs out of shared logs when they contain sensitive material.
 
-Keep loopback-only defaults unless the user explicitly chooses a remote inference
-service and understands where the selected input will be sent. A harness should
-not automatically retry policy failures with `--allow-nonlocal` or
-`--allow-redirects`, or raise limits after a bounds failure.
-
-To measure selected invocations, explicitly add `--usage-file` with a private local
-path outside the repository. Use the same absolute path across cooperating agents.
-`offload stats --usage-file ... --json` reports counts and server-provided tokens;
-missing usage stays unknown. A metrics failure exits 7 after otherwise successful
-work, so do not retry inference automatically just to repair the log. This opt-in
-does not enable logging for any other harness invocation.
+For metrics, select an explicit private usage path or config. For content retention,
+separately enable content logging and choose a private file. Use a consistent absolute
+path across cooperating processes, and review the configuration before selecting it.
+A logging failure can occur after successful inference; do not repeat the inference
+just to repair the log. Storage flags express API behavior rather than proof of a
+server operator's retention policy.

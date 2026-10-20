@@ -5,19 +5,19 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"errors"
+	"github.com/joel-g/offload/internal/logfile"
 	"io"
 	"os"
-	"runtime"
+
 	"strings"
 	"time"
 )
 
-const MaxFileBytes = 32 << 20
+const MaxFileBytes = logfile.MaxFileBytes
 const MaxRecordBytes = 4096
 const MaxTokens = int64(1_000_000_000)
 
-var ErrLog = errors.New("usage log unavailable, unsafe, full, or invalid")
+var ErrLog = logfile.ErrLog
 
 // Usage preserves missing or invalid server counts as null, independently per field.
 type Usage struct {
@@ -58,19 +58,29 @@ func ValidModel(s string) bool {
 }
 
 type Event struct {
-	Version    int       `json:"version"`
-	Timestamp  time.Time `json:"timestamp"`
-	DurationMS int64     `json:"duration_ms"`
-	Command    string    `json:"command"`
-	Model      string    `json:"model,omitempty"`
-	Scope      string    `json:"scope"`
-	Attempted  bool      `json:"attempted"`
-	Outcome    string    `json:"outcome"`
-	Usage      Usage     `json:"usage"`
+	Version        int       `json:"version"`
+	Timestamp      time.Time `json:"timestamp"`
+	DurationMS     int64     `json:"duration_ms"`
+	Command        string    `json:"command"`
+	Model          string    `json:"model,omitempty"`
+	Scope          string    `json:"scope"`
+	Attempted      bool      `json:"attempted"`
+	Outcome        string    `json:"outcome"`
+	ResponseStatus string    `json:"response_status,omitempty"`
+	Usage          Usage     `json:"usage"`
 }
 
 func Inference(command string) bool {
-	return command == "ask" || command == "summarize" || command == "review"
+	return command == "ask" || command == "summarize" || command == "review" || command == "responses"
+}
+
+// ResponseStatus accepts only the documented response-state vocabulary.
+func ResponseStatus(s string) string {
+	switch s {
+	case "completed", "failed", "incomplete", "in_progress", "queued", "cancelled":
+		return s
+	}
+	return ""
 }
 
 func valid(e Event) bool {
@@ -78,6 +88,9 @@ func valid(e Event) bool {
 		return false
 	}
 	if !Inference(e.Command) && e.Command != "health" && e.Command != "models" {
+		return false
+	}
+	if e.ResponseStatus != "" && (ResponseStatus(e.ResponseStatus) == "" || !Inference(e.Command) || !e.Attempted) {
 		return false
 	}
 	if e.Scope != "loopback_only" && e.Scope != "nonlocal_allowed" {
@@ -94,9 +107,6 @@ func valid(e Event) bool {
 	if e.Outcome == "success" && !e.Attempted {
 		return false
 	}
-	if Inference(e.Command) && e.Attempted && e.Model == "" {
-		return false
-	}
 	if !Inference(e.Command) && e.Model != "" {
 		return false
 	}
@@ -108,91 +118,16 @@ func valid(e Event) bool {
 	return true
 }
 
-// withLock serializes cooperating processes using an exclusive sibling directory.
-// It never breaks a stale lock: a crashed writer requires manual recovery.
-func withLock(path string, fn func() error) (err error) {
-	if path == "" {
-		return ErrLog
-	}
-	lock := path + ".lock"
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		err = os.Mkdir(lock, 0700)
-		if err == nil {
-			break
-		}
-		if !os.IsExist(err) || time.Now().After(deadline) {
-			return ErrLog
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	defer func() {
-		if os.Remove(lock) != nil {
-			err = ErrLog
-		}
-	}()
-	return fn()
-}
-
-func checkFile(path string) (os.FileInfo, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	// On Windows permissions are inherited ACLs; mode bits do not provide ACL privacy.
-	if !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0) || info.Size() > MaxFileBytes {
-		return nil, ErrLog
-	}
-	return info, nil
-}
-
 // Append writes one complete event under a lock, with no content-bearing errors.
 func Append(path string, event Event) error {
 	if !valid(event) {
 		return ErrLog
 	}
 	b, err := json.Marshal(event)
-	if err != nil || len(b)+1 > MaxRecordBytes {
+	if err != nil {
 		return ErrLog
 	}
-	b = append(b, '\n')
-	return withLock(path, func() error {
-		info, err := checkFile(path)
-		exists := err == nil
-		if err != nil && !os.IsNotExist(err) {
-			return ErrLog
-		}
-		flags := os.O_RDWR | os.O_APPEND
-		if !exists {
-			flags |= os.O_CREATE | os.O_EXCL
-		}
-		f, err := os.OpenFile(path, flags, 0600)
-		if err != nil {
-			return ErrLog
-		}
-		defer f.Close()
-		if exists {
-			if info.Size()+int64(len(b)) > MaxFileBytes {
-				return ErrLog
-			}
-			if info.Size() > 0 {
-				tail := make([]byte, 1)
-				if _, err := f.ReadAt(tail, info.Size()-1); err != nil || tail[0] != '\n' {
-					return ErrLog
-				}
-			}
-		}
-		if n, err := f.Write(b); err != nil || n != len(b) {
-			return ErrLog
-		}
-		if f.Sync() != nil {
-			return ErrLog
-		}
-		if f.Close() != nil {
-			return ErrLog
-		}
-		return nil
-	})
+	return logfile.AppendLine(path, b, MaxRecordBytes)
 }
 
 type Count struct {
@@ -217,12 +152,13 @@ type InferenceCount struct {
 	Tokens Tokens `json:"tokens"`
 }
 type Summary struct {
-	Events      int64            `json:"events"`
-	Commands    map[string]int64 `json:"commands"`
-	Loopback    InferenceCount   `json:"loopback_inference"`
-	Nonlocal    InferenceCount   `json:"nonlocal_allowed_inference"`
-	Checks      Count            `json:"service_checks"`
-	PartialTail bool             `json:"partial_tail_ignored"`
+	Events           int64            `json:"events"`
+	Commands         map[string]int64 `json:"commands"`
+	ResponseStatuses map[string]int64 `json:"response_statuses"`
+	Loopback         InferenceCount   `json:"loopback_inference"`
+	Nonlocal         InferenceCount   `json:"nonlocal_allowed_inference"`
+	Checks           Count            `json:"service_checks"`
+	PartialTail      bool             `json:"partial_tail_ignored"`
 }
 
 func (c *Count) add(e Event) {
@@ -252,6 +188,9 @@ func (c *TokenCount) add(n *int64) {
 func (s *Summary) add(e Event) {
 	s.Events++
 	s.Commands[e.Command]++
+	if e.ResponseStatus != "" {
+		s.ResponseStatuses[e.ResponseStatus]++
+	}
 	if !Inference(e.Command) {
 		s.Checks.add(e)
 		return
@@ -271,9 +210,9 @@ func (s *Summary) add(e Event) {
 // Read uses the writer lock for a stable snapshot. Complete malformed records fail
 // closed. An unterminated final fragment is ignored and explicitly reported.
 func Read(path string) (Summary, error) {
-	summary := Summary{Commands: make(map[string]int64)}
-	err := withLock(path, func() error {
-		if _, err := checkFile(path); err != nil {
+	summary := Summary{Commands: make(map[string]int64), ResponseStatuses: make(map[string]int64)}
+	err := logfile.WithLock(path, func() error {
+		if _, err := logfile.CheckFile(path); err != nil {
 			return ErrLog
 		}
 		f, err := os.Open(path)

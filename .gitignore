@@ -3,3 +3,6 @@
 /coverage.out
 /usage.jsonl
 /usage.jsonl.lock/
+/content.jsonl
+/content.jsonl.lock/
+/config.json

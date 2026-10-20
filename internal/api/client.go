@@ -32,10 +32,14 @@ type Config struct {
 	Endpoint                      string
 	AllowNonlocal, AllowRedirects bool
 	Timeout                       time.Duration
+	MaxResponseBytes              int64
+	APIKey                        string
 }
 type Client struct {
-	base *url.URL
-	http *http.Client
+	base             *url.URL
+	http             *http.Client
+	maxResponseBytes int64
+	apiKey           string
 }
 
 func validate(u *url.URL, nonlocal bool) error {
@@ -51,6 +55,12 @@ func validate(u *url.URL, nonlocal bool) error {
 }
 
 func New(cfg Config) (*Client, error) {
+	if cfg.MaxResponseBytes == 0 {
+		cfg.MaxResponseBytes = MaxResponseBytes
+	}
+	if cfg.MaxResponseBytes < 1 || cfg.MaxResponseBytes == int64(^uint64(0)>>1) {
+		return nil, Fail(2, "response byte limit must be positive and representable")
+	}
 	u, err := url.Parse(cfg.Endpoint)
 	if err != nil {
 		return nil, Fail(2, "invalid endpoint URL")
@@ -83,6 +93,9 @@ func New(cfg Config) (*Client, error) {
 	}
 	client := &http.Client{Timeout: cfg.Timeout, Transport: transport}
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) > 0 && (req.URL.Scheme != via[0].URL.Scheme || !strings.EqualFold(req.URL.Host, via[0].URL.Host)) {
+			req.Header.Del("Authorization")
+		}
 		if !cfg.AllowRedirects {
 			return errors.New("redirect denied")
 		}
@@ -91,7 +104,7 @@ func New(cfg Config) (*Client, error) {
 		}
 		return validate(req.URL, cfg.AllowNonlocal)
 	}
-	return &Client{u, client}, nil
+	return &Client{u, client, cfg.MaxResponseBytes, cfg.APIKey}, nil
 }
 
 func (c *Client) Close() { c.http.CloseIdleConnections() }
@@ -113,6 +126,9 @@ func (c *Client) request(ctx context.Context, method, path string, body any, tar
 		return Fail(2, "cannot construct request")
 	}
 	req.Header.Set("Accept", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -124,11 +140,11 @@ func (c *Client) request(ctx context.Context, method, path string, body any, tar
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return Fail(4, fmt.Sprintf("server returned HTTP %d", resp.StatusCode))
 	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes+1))
+	b, err := io.ReadAll(io.LimitReader(resp.Body, c.maxResponseBytes+1))
 	if err != nil {
 		return transportError(ctx, err)
 	}
-	if len(b) > MaxResponseBytes {
+	if int64(len(b)) > c.maxResponseBytes {
 		return Fail(6, "response exceeds byte limit")
 	}
 	if json.Unmarshal(b, target) != nil {
@@ -148,15 +164,6 @@ func transportError(ctx context.Context, err error) error {
 	return Fail(3, "HTTP request failed (connection, TLS, or redirect policy)")
 }
 
-type ResponseRequest struct {
-	Model           string `json:"model"`
-	Instructions    string `json:"instructions"`
-	Input           string `json:"input"`
-	Store           bool   `json:"store"`
-	Stream          bool   `json:"stream"`
-	MaxOutputTokens int    `json:"max_output_tokens"`
-}
-
 type response struct {
 	Status string          `json:"status"`
 	Error  json.RawMessage `json:"error"`
@@ -171,18 +178,35 @@ type response struct {
 	} `json:"output"`
 }
 
-func (c *Client) Generate(ctx context.Context, model, instruction, input string, tokens, maxOutput int) (string, metrics.Usage, error) {
-	var result response
-	var usage metrics.Usage
-	if err := c.request(ctx, http.MethodPost, "/v1/responses", ResponseRequest{model, instruction, input, false, false, tokens}, &result); err != nil {
-		return "", usage, err
+// CreateResponse forwards explicit API fields and preserves the response object.
+// Streaming is the sole request-mode restriction: this client consumes JSON, not SSE.
+func (c *Client) CreateResponse(ctx context.Context, body map[string]json.RawMessage) (json.RawMessage, metrics.Usage, error) {
+	if stream, exists := body["stream"]; exists && string(stream) != "false" && string(stream) != "null" {
+		return nil, metrics.Usage{}, Fail(2, "streaming is not supported; omit stream or set false")
 	}
-	usage = metrics.ParseUsage(result.Usage)
+	var raw json.RawMessage
+	if err := c.request(ctx, http.MethodPost, "/v1/responses", body, &raw); err != nil {
+		return nil, metrics.Usage{}, err
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return nil, metrics.Usage{}, Fail(5, "response must be a JSON object")
+	}
+	return raw, metrics.ParseUsage(fields["usage"]), nil
+}
+
+// Text extracts text for human-facing convenience commands. Structured output
+// bypasses this projection and preserves tool calls, reasoning and partial output.
+func Text(raw json.RawMessage, maxOutput int) (string, error) {
+	var result response
+	if json.Unmarshal(raw, &result) != nil {
+		return "", Fail(5, "invalid response object")
+	}
 	if (len(result.Error) > 0 && string(result.Error) != "null") || result.Status == "failed" {
-		return "", usage, Fail(4, "inference failed")
+		return "", Fail(4, "inference failed")
 	}
 	if result.Status != "completed" {
-		return "", usage, Fail(5, "inference did not complete; no partial output returned")
+		return "", Fail(5, "inference did not complete; use structured output to inspect the response")
 	}
 	var parts []string
 	for _, item := range result.Output {
@@ -191,7 +215,7 @@ func (c *Client) Generate(ctx context.Context, model, instruction, input string,
 		}
 		for _, part := range item.Content {
 			if part.Type == "refusal" {
-				return "", usage, Fail(5, "model refused the request")
+				return "", Fail(5, "model refused the request; use structured output to inspect the response")
 			}
 			if part.Type == "output_text" {
 				parts = append(parts, part.Text)
@@ -200,12 +224,12 @@ func (c *Client) Generate(ctx context.Context, model, instruction, input string,
 	}
 	text := strings.Join(parts, "\n")
 	if strings.TrimSpace(text) == "" {
-		return "", usage, Fail(5, "response contains no assistant text")
+		return "", Fail(5, "response contains no assistant text; use structured output to inspect tool calls")
 	}
 	if len(text) > maxOutput {
-		return "", usage, Fail(6, "output exceeds byte limit")
+		return "", Fail(6, "output exceeds byte limit")
 	}
-	return text, usage, nil
+	return text, nil
 }
 
 func (c *Client) Models(ctx context.Context) ([]string, error) {
@@ -222,7 +246,7 @@ func (c *Client) Models(ctx context.Context) ([]string, error) {
 	}
 	models := make([]string, 0, len(result.Data))
 	for _, model := range result.Data {
-		if !metrics.ValidModel(model.ID) {
+		if model.ID == "" {
 			return nil, Fail(5, "response contains invalid model ID")
 		}
 		models = append(models, model.ID)
