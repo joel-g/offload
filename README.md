@@ -3,7 +3,7 @@
 A small, harness-agnostic Go CLI for sending explicit, bounded work to local
 inference. Works from a terminal or a coding harness such as Codex or Claude Code.
 It does not crawl repositories, run shell commands, dispatch model tools, or edit
-files. Model output is advice for the caller to review.
+source files. Model output is advice for the caller to review.
 
 ## Build
 
@@ -31,12 +31,16 @@ offload models
 offload ask --model local-model --file question.txt
 offload summarize --model local-model --file notes.txt --json
 offload review --model local-model --file change.diff
+offload ask --model local-model --file question.txt --usage-file usage.jsonl
+offload stats --usage-file usage.jsonl --json
 printf 'Explain this small algorithm.\n' | offload ask --model local-model --stdin
 ```
 
 Choose exactly one of `--file` and `--stdin`. Inputs must be nonempty UTF-8 text.
 Files must be regular files. Model IDs are explicit; select an advertised ID from
-`models`. `health` checks that `/v1/models` returns a model list; it does not load a
+`models`. IDs must be 1–128 ASCII characters, start with a letter or digit, and
+contain only letters, digits, `/`, `.`, `_`, `:`, or `-`; URLs and drive paths are
+rejected. `health` checks that `/v1/models` returns a model list; it does not load a
 model or prove generation works. An empty advertised list is a healthy API.
 
 | Flag | Default | Allowed range / meaning |
@@ -49,6 +53,7 @@ model or prove generation works. An empty advertised list is a healthy API.
 | `--json` | false | Structured result on stdout; errors on stderr |
 | `--allow-nonlocal` | false | Explicitly permit non-loopback destinations |
 | `--allow-redirects` | false | Permit redirects, subject to destination policy |
+| `--usage-file` | unset | Opt in to local usage JSONL; `stats` reads this explicit file |
 
 Limits reject oversized data rather than silently truncating it. The HTTP response
 body has a fixed 8 MiB ceiling. Generated-text limits exclude JSON encoding and the
@@ -79,6 +84,7 @@ can produce a plain error. Help is always plain text.
 | 4 | HTTP failure or failed inference |
 | 5 | Malformed, empty, refused, or incomplete response |
 | 6 | Input, response, or output exceeds a byte limit |
+| 7 | Usage recording or stats read failure |
 | 124 | HTTP timeout |
 | 130 | Request canceled |
 
@@ -102,3 +108,13 @@ allows data egress, including plain HTTP if configured. Prefer HTTPS for remote
 servers. No TLS verification bypass is provided.
 
 See [design](docs/design.md) and [harness integration](docs/harnesses.md).
+
+## Optional usage metrics
+
+Metrics are off by default. Supply `--usage-file` on each invocation you want to
+count; there is no environment opt-in or default file location. Relative paths
+resolve from the current directory. Use a private directory outside source control
+and the same absolute path for cooperating harnesses. `stats --usage-file ...`
+prints a summary; add `--json` for structured totals. Stats never calls inference
+or records itself. See [usage metrics](docs/usage-metrics.md) for schema, unknown
+counts, permissions, concurrency, and retention.

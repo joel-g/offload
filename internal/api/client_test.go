@@ -32,7 +32,8 @@ func client(t *testing.T, handler http.HandlerFunc) *Client {
 	return c
 }
 func generate(c *Client) (string, error) {
-	return c.Generate(context.Background(), "test-model", "instruction", "private-input", 42, 100)
+	text, _, err := c.Generate(context.Background(), "test-model", "instruction", "private-input", 42, 100)
+	return text, err
 }
 
 func TestRequestShape(t *testing.T) {
@@ -87,7 +88,7 @@ func TestOutputBoundAndParts(t *testing.T) {
 	if got != "one\ntwo" || err != nil {
 		t.Fatalf("%q %v", got, err)
 	}
-	_, err = c.Generate(context.Background(), "m", "i", "x", 1, 6)
+	_, _, err = c.Generate(context.Background(), "m", "i", "x", 1, 6)
 	code(t, err, 6)
 }
 func TestCancelAndTimeout(t *testing.T) {
@@ -201,5 +202,26 @@ func TestNoAmbientProxyAndModels(t *testing.T) {
 	got, err := c.Models(context.Background())
 	if err != nil || len(got) != 1 || got[0] != "test-model" {
 		t.Fatalf("%v %v", got, err)
+	}
+}
+
+func TestServerUsage(t *testing.T) {
+	for _, status := range []string{"completed", "incomplete", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			c := client(t, func(w http.ResponseWriter, r *http.Request) {
+				body := strings.Replace(completed, `"completed"`, fmt.Sprintf("%q", status), 1)
+				fmt.Fprint(w, strings.TrimSuffix(body, "}")+`,"model":"private-server-model","usage":{"input_tokens":12,"output_tokens":0,"total_tokens":"private-invalid"}}`)
+			})
+			_, usage, err := c.Generate(context.Background(), "test-model", "instruction", "input", 10, 100)
+			if usage.Input == nil || *usage.Input != 12 || usage.Output == nil || *usage.Output != 0 || usage.Total != nil {
+				t.Fatal("incorrect usage parsing")
+			}
+			if status == "completed" && err != nil {
+				t.Fatal(err)
+			}
+			if status != "completed" && err == nil {
+				t.Fatal("expected generation failure")
+			}
+		})
 	}
 }

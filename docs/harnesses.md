@@ -25,3 +25,10 @@ Keep loopback-only defaults unless the user explicitly chooses a remote inferenc
 service and understands where the selected input will be sent. A harness should
 not automatically retry policy failures with `--allow-nonlocal` or
 `--allow-redirects`, or raise limits after a bounds failure.
+
+To measure selected invocations, explicitly add `--usage-file` with a private local
+path outside the repository. Use the same absolute path across cooperating agents.
+`offload stats --usage-file ... --json` reports counts and server-provided tokens;
+missing usage stays unknown. A metrics failure exits 7 after otherwise successful
+work, so do not retry inference automatically just to repair the log. This opt-in
+does not enable logging for any other harness invocation.

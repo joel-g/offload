@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/joel-g/offload/internal/metrics"
 )
 
 const MaxResponseBytes = 8 << 20
@@ -158,6 +160,7 @@ type ResponseRequest struct {
 type response struct {
 	Status string          `json:"status"`
 	Error  json.RawMessage `json:"error"`
+	Usage  json.RawMessage `json:"usage"`
 	Output []struct {
 		Type    string `json:"type"`
 		Role    string `json:"role"`
@@ -168,16 +171,18 @@ type response struct {
 	} `json:"output"`
 }
 
-func (c *Client) Generate(ctx context.Context, model, instruction, input string, tokens, maxOutput int) (string, error) {
+func (c *Client) Generate(ctx context.Context, model, instruction, input string, tokens, maxOutput int) (string, metrics.Usage, error) {
 	var result response
+	var usage metrics.Usage
 	if err := c.request(ctx, http.MethodPost, "/v1/responses", ResponseRequest{model, instruction, input, false, false, tokens}, &result); err != nil {
-		return "", err
+		return "", usage, err
 	}
+	usage = metrics.ParseUsage(result.Usage)
 	if (len(result.Error) > 0 && string(result.Error) != "null") || result.Status == "failed" {
-		return "", Fail(4, "inference failed")
+		return "", usage, Fail(4, "inference failed")
 	}
 	if result.Status != "completed" {
-		return "", Fail(5, "inference did not complete; no partial output returned")
+		return "", usage, Fail(5, "inference did not complete; no partial output returned")
 	}
 	var parts []string
 	for _, item := range result.Output {
@@ -186,7 +191,7 @@ func (c *Client) Generate(ctx context.Context, model, instruction, input string,
 		}
 		for _, part := range item.Content {
 			if part.Type == "refusal" {
-				return "", Fail(5, "model refused the request")
+				return "", usage, Fail(5, "model refused the request")
 			}
 			if part.Type == "output_text" {
 				parts = append(parts, part.Text)
@@ -195,12 +200,12 @@ func (c *Client) Generate(ctx context.Context, model, instruction, input string,
 	}
 	text := strings.Join(parts, "\n")
 	if strings.TrimSpace(text) == "" {
-		return "", Fail(5, "response contains no assistant text")
+		return "", usage, Fail(5, "response contains no assistant text")
 	}
 	if len(text) > maxOutput {
-		return "", Fail(6, "output exceeds byte limit")
+		return "", usage, Fail(6, "output exceeds byte limit")
 	}
-	return text, nil
+	return text, usage, nil
 }
 
 func (c *Client) Models(ctx context.Context) ([]string, error) {
@@ -217,7 +222,7 @@ func (c *Client) Models(ctx context.Context) ([]string, error) {
 	}
 	models := make([]string, 0, len(result.Data))
 	for _, model := range result.Data {
-		if model.ID == "" {
+		if !metrics.ValidModel(model.ID) {
 			return nil, Fail(5, "response contains invalid model ID")
 		}
 		models = append(models, model.ID)

@@ -1,3 +1,5 @@
 /offload
 /offload.exe
 /coverage.out
+/usage.jsonl
+/usage.jsonl.lock/
